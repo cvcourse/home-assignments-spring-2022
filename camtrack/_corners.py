@@ -91,8 +91,9 @@ class _ColorGenerator:
         self._rng = np.random.RandomState()
 
     def __call__(self, corner_id):
-        self._rng.seed(corner_id)
-        return _to_int_tuple(self._rng.random(size=(3,)))
+        # self._rng.seed(corner_id)
+        # return _to_int_tuple(self._rng.random(size=(3,)))
+        return (0, 255, 0)
 
 
 def draw(grayscale_image: np.ndarray, corners: FrameCorners) -> np.ndarray:
