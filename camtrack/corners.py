@@ -48,17 +48,36 @@ class _CornerStorageBuilder:
 
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    # TODO
     image_0 = frame_sequence[0]
-    corners = FrameCorners(
-        np.array([0]),
-        np.array([[0, 0]]),
-        np.array([55])
-    )
-    builder.set_corners_at_frame(0, corners)
+    builder.set_corners_at_frame(0, _get_corners_for_frame(image_0))
     for frame, image_1 in enumerate(frame_sequence[1:], 1):
-        builder.set_corners_at_frame(frame, corners)
-        image_0 = image_1
+        builder.set_corners_at_frame(frame, _get_corners_for_frame(image_1))
+
+
+def _get_corners_for_frame(frame: np.array) -> FrameCorners:
+    block_size = 7
+
+    cv_corners = cv2.goodFeaturesToTrack(
+        image=frame,
+        maxCorners=2**30,
+        qualityLevel=0.01,
+        minDistance=10,
+        blockSize=block_size
+    )
+
+    corners_count = len(cv_corners)
+
+    ids = list(range(0, corners_count))
+    points = list(map(lambda i: i[0], cv_corners))
+    sizes = list(np.ones(corners_count) * block_size)
+
+    corners = FrameCorners(
+        ids=np.array(ids),
+        points=np.array(points),
+        sizes=np.array(sizes)
+    )
+
+    return corners
 
 
 def build(frame_sequence: pims.FramesSequence,
