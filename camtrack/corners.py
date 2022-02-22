@@ -12,14 +12,16 @@ __all__ = [
     'without_short_tracks'
 ]
 
-import os
 from dataclasses import dataclass
+from typing import List
 
 import click
 import cv2
 import numpy as np
 import pims
+from numba import jit
 
+import utils
 from _corners import (
     FrameCorners,
     CornerStorage,
@@ -32,8 +34,7 @@ from _corners import (
     without_short_tracks,
     create_cli
 )
-
-from typing import List
+from utils import map_l
 
 
 class _CornerStorageBuilder:
@@ -51,11 +52,18 @@ class _CornerStorageBuilder:
         return StorageImpl(item[1] for item in sorted(self._corners.items()))
 
 
-CORNER_BLOCK_SIZE = 9
-CORNER_QUALITY_LEVEL = 0.05
-MAX_CORNERS = 2**31 - 1
+@dataclass
+class _CornerWithBlockSize():
+    point: np.ndarray
+    block_size: int
 
-PYRAMID_SIZE_THRESHOLD_PERCENT = 0.1
+
+CORNER_BLOCK_SIZE = 9
+CORNER_QUALITY_LEVEL = 0.01
+MAX_CORNERS = 2 ** 31 - 1
+
+PYRAMID_MIN_SIZE_THRESHOLD_PERCENT = 0.1
+PYRAMID_CORNER_DISTANCE_THRESHOLD_PX = 20
 PYRAMID_SHOW_BLOCKS = False
 
 
@@ -75,36 +83,28 @@ def _build_impl(frame_sequence: pims.FramesSequence,
 
 
 def _get_corners_for_frame(frame: np.array, use_pyramid=True) -> FrameCorners:
-    @dataclass
-    class CornerWithBlockSize():
-        point: tuple
-        block_size: int
-
     if use_pyramid:
         pyramid = _build_pyramid_for_frame(frame)
 
-        all_corners = []
+        raw_corners = []
+        removed_corners = set()
         pyramid_size = len(pyramid)
         for layer in range(pyramid_size):
-            if PYRAMID_SHOW_BLOCKS:
-                block_size = CORNER_BLOCK_SIZE * _pyramid_coef(pyramid_size, layer)
-            else:
-                block_size = CORNER_BLOCK_SIZE
+            new_corners = _pyramid_find_corners_for_layer(pyramid, layer)
+            _pyramid_filter_close_corners(
+                raw_corners=raw_corners,
+                removed_corners=removed_corners,
+                new_corners=new_corners
+            )
 
-            corners = _get_corners_for_single_frame(pyramid[layer])
-            corners = map(
-                lambda corner: _rescale_corner(corner, pyramid_size, layer),
-                corners
-            )
-            corners = map(
-                lambda corner: CornerWithBlockSize(corner, block_size),
-                corners
-            )
-            corners = list(corners)
-            all_corners += corners
+        all_corners = []
+        for (i, corner) in enumerate(raw_corners):
+            if i not in removed_corners:
+                all_corners.append(corner)
+
     else:
         all_corners = map_l(
-            lambda x: CornerWithBlockSize(x, CORNER_BLOCK_SIZE),
+            lambda x: _CornerWithBlockSize(x, CORNER_BLOCK_SIZE),
             _get_corners_for_single_frame(frame)
         )
 
@@ -126,8 +126,10 @@ def _get_corners_for_frame(frame: np.array, use_pyramid=True) -> FrameCorners:
 def _get_corners_for_single_frame(frame: np.array) -> np.array:
     block_size = CORNER_BLOCK_SIZE
 
+    prepared_frame = _preprocess_image(frame)
+
     corners = cv2.goodFeaturesToTrack(
-        image=frame,
+        image=prepared_frame,
         maxCorners=MAX_CORNERS,
         qualityLevel=CORNER_QUALITY_LEVEL,
         minDistance=block_size + block_size // 2,
@@ -139,6 +141,13 @@ def _get_corners_for_single_frame(frame: np.array) -> np.array:
     return np.array(corners)
 
 
+def _preprocess_image(frame: np.array) -> np.array:
+    prepared_frame = utils.smooth(frame, ksize=7)
+    prepared_frame = utils.sharpen(prepared_frame)
+
+    return prepared_frame
+
+
 def _build_pyramid_for_frame(frame: np.array) -> List[np.array]:
     """
     Build pyramid for the frame.
@@ -147,7 +156,7 @@ def _build_pyramid_for_frame(frame: np.array) -> List[np.array]:
 
     (height, width) = np.shape(frame)
     size_threshold = int(
-        min(height, width) * PYRAMID_SIZE_THRESHOLD_PERCENT
+        min(height, width) * PYRAMID_MIN_SIZE_THRESHOLD_PERCENT
     )
 
     def frame_is_large_enough(cur_frame: np.array):
@@ -164,6 +173,47 @@ def _build_pyramid_for_frame(frame: np.array) -> List[np.array]:
     return list(reversed(out))
 
 
+def _pyramid_find_corners_for_layer(
+        pyramid: List[np.array],
+        layer: int
+) -> List[_CornerWithBlockSize]:
+    pyramid_size = len(pyramid)
+
+    if PYRAMID_SHOW_BLOCKS:
+        block_size = CORNER_BLOCK_SIZE * _pyramid_coef(pyramid_size, layer)
+    else:
+        block_size = CORNER_BLOCK_SIZE
+
+    corners = _get_corners_for_single_frame(pyramid[layer])
+    corners = map(
+        lambda corner: _rescale_corner(corner, pyramid_size, layer),
+        corners
+    )
+    corners = map(
+        lambda corner: _CornerWithBlockSize(corner, block_size),
+        corners
+    )
+    corners = list(corners)
+
+    return corners
+
+
+def _pyramid_filter_close_corners(raw_corners, removed_corners, new_corners):
+    for (i, old_corner) in enumerate(raw_corners):
+        if i in removed_corners:
+            continue
+
+        for (j, new_corner) in enumerate(new_corners):
+            distance = utils.manhattan_distance(
+                old_corner.point,
+                new_corner.point
+            )
+            if distance < PYRAMID_CORNER_DISTANCE_THRESHOLD_PX:
+                removed_corners.add(i)
+
+    raw_corners.extend(new_corners)
+
+
 def _diminish_frame_size(frame: np.array) -> np.array:
     return cv2.pyrDown(frame)
 
@@ -177,21 +227,13 @@ def _rescale_corner(corner: np.array, pyramid_size: int, layer: int) -> np.array
     return np.array(map_l(lambda x: x * coef, corner))
 
 
+@jit
 def _pyramid_coef(pyramid_size: int, layer: int) -> int:
     """
     Return scaling coefficient of the pyramid layer.
     Lower layer is lower image.
     """
     return 2 ** (pyramid_size - layer - 1)
-
-
-def _dump_pyramid(pyramid: List[np.array]):
-    base_path = "out/debug/pyramid"
-    os.makedirs(base_path, exist_ok=True)
-
-    for i in range(len(pyramid)):
-        # TODO: proper dump
-        cv2.imwrite(f"{base_path}/{i}.jpg", pyramid[i])
 
 
 def build(frame_sequence: pims.FramesSequence,
@@ -212,9 +254,6 @@ def build(frame_sequence: pims.FramesSequence,
         builder = _CornerStorageBuilder()
         _build_impl(frame_sequence, builder)
     return builder.build_corner_storage()
-
-
-def map_l(f, sequence): return list(map(f, sequence))
 
 
 if __name__ == '__main__':
