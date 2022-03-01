@@ -37,3 +37,7 @@ def smooth(img: np.array, ksize=3) -> np.array:
         ksize=(ksize, ksize),
         sigmaX=0
     )
+
+
+def to_cv_8u(img: np.array) -> np.array:
+    return np.array(np.round(img * 255.), np.uint8)
