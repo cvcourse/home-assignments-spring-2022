@@ -8,6 +8,15 @@ from numba import jit
 def map_l(f, sequence): return list(map(f, sequence))
 
 
+def group_by(iterable: Iterable, key_getter, result_mapping=lambda x: x):
+    result = {}
+    for item in iterable:
+        key = key_getter(item)
+        result.setdefault(key, []).append(result_mapping(item))
+
+    return result
+
+
 @jit(nopython=True)
 def manhattan_distance(vec1: Iterable, vec2: Iterable):
     distance = 0
