@@ -18,6 +18,16 @@ def group_by(iterable: Iterable, key_getter, result_mapping=lambda x: x):
 
 
 @jit(nopython=True)
+def coerce_in(n: int, start: int, end: int):
+    if n < start:
+        return start
+    elif n >= end:
+        return end - 1
+    else:
+        return n
+
+
+@jit(nopython=True)
 def manhattan_distance(vec1: Iterable, vec2: Iterable):
     distance = 0
     for (x1, x2) in zip(vec1, vec2):

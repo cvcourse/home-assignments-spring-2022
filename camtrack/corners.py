@@ -52,12 +52,13 @@ class _CornerStorageBuilder:
 
 
 CORNER_BLOCK_SIZE = 9
-CORNER_QUALITY_LEVEL = 0.005
-CORNER_MIN_DISTANCE_PX = 20
+CORNER_QUALITY_LEVEL = 0.01
+CORNER_MIN_DISTANCE_PX = 10
 MAX_CORNERS = 2 ** 31 - 1
 
-PYRAMID_MIN_SIZE_THRESHOLD_PERCENT = 0.1
-PYRAMID_SHOW_BLOCKS = False
+CORNERS_UPDATE_FREQUENCY_FRAMES = 1
+
+PYRAMID_MIN_SIZE_THRESHOLD_PERCENT = 0.25
 
 OPTICAL_FLOW_BLOCK_SIZE = 15
 OPTICAL_FLOW_PARAMS = dict(
@@ -92,10 +93,10 @@ def _build_impl(frame_sequence: pims.FramesSequence,
     prev_image = utils.to_cv_8u(image)
     prev_corners = frame_corners
     prev_ids = frame_corners.ids
-    for frame, image in enumerate(frame_sequence[1:], 1):
+    for frame_index, image in enumerate(frame_sequence[1:], 1):
         image = utils.to_cv_8u(image)
 
-        prev_points = np.float32(prev_corners.points.reshape(-1, 2))
+        prev_points = prev_corners.points
 
         (optical_flow, is_good, _) = cv2.calcOpticalFlowPyrLK(
             prevImg=prev_image,
@@ -119,16 +120,32 @@ def _build_impl(frame_sequence: pims.FramesSequence,
         optical_flow = optical_flow.reshape(-1, 2)
         points = []
         ids = []
+        mask = np.full_like(image, dtype=bool, fill_value=True)
         for point_index, point in enumerate(optical_flow):
             if is_good[point_index]:
                 ids.append(prev_ids[point_index])
                 points.append(point)
+                _update_mask(mask, point)
+
+        if frame_index % CORNERS_UPDATE_FREQUENCY_FRAMES == 0:
+            new_points = _get_corners_for_frame(image)
+            new_points_filtered = []
+            for point in new_points:
+                (x, y) = np.int32(point)
+                if mask[y, x]:
+                    new_points_filtered.append(point)
+
+            points.extend(new_points_filtered)
+
+            start_index = ids[-1][0] + 1
+            end_index = start_index + len(new_points_filtered) - 1
+            ids.extend([[x] for x in range(start_index, end_index)])
 
         points = np.array(points)
         ids = np.array(ids)
 
         new_corners = _to_frame_corners(points, ids)
-        builder.set_corners_at_frame(frame, new_corners)
+        builder.set_corners_at_frame(frame_index, new_corners)
 
         prev_image = image
         prev_ids = ids
@@ -150,7 +167,7 @@ def _get_corners_for_frame(frame: np.array, use_pyramid=True) -> np.ndarray:
 
         raw_corners = np.array(raw_corners)
         filtered_corners = _filter_close_corners(
-            np.array(raw_corners),
+            raw_corners,
             CORNER_MIN_DISTANCE_PX
         )
 
@@ -162,7 +179,7 @@ def _get_corners_for_frame(frame: np.array, use_pyramid=True) -> np.ndarray:
     return all_corners
 
 
-def _get_corners_for_single_frame(frame: np.array) -> np.array:
+def _get_corners_for_single_frame(frame: np.array, mask: np.array = None) -> np.array:
     block_size = CORNER_BLOCK_SIZE
 
     prepared_frame = _preprocess_image(frame)
@@ -172,7 +189,8 @@ def _get_corners_for_single_frame(frame: np.array) -> np.array:
         maxCorners=MAX_CORNERS,
         qualityLevel=CORNER_QUALITY_LEVEL,
         minDistance=block_size + block_size // 2,
-        blockSize=block_size
+        blockSize=block_size,
+        mask=mask
     )
 
     return corners.reshape(-1, 2)
@@ -183,6 +201,16 @@ def _preprocess_image(frame: np.array) -> np.array:
     prepared_frame = utils.sharpen(prepared_frame)
 
     return prepared_frame
+
+
+def _update_mask(mask: np.ndarray, point: np.ndarray):
+    (x, y) = np.int32(point)
+    (h, w) = mask.shape
+    y_from = utils.coerce_in(y - CORNER_MIN_DISTANCE_PX, 0, h)
+    y_to = utils.coerce_in(y + CORNER_MIN_DISTANCE_PX, 0, h) + 1
+    x_from = utils.coerce_in(x - CORNER_MIN_DISTANCE_PX, 0, w)
+    x_to = utils.coerce_in(x + CORNER_MIN_DISTANCE_PX, 0, w) + 1
+    mask[y_from:y_to, x_from:x_to] = 0
 
 
 def _build_pyramid_for_frame(frame: np.array) -> List[np.array]:
@@ -223,7 +251,6 @@ def _pyramid_find_corners_for_layer(
 def _filter_close_corners(corners: np.ndarray, radius: int) -> np.ndarray:
     """
     Filter out close corners with given radius.
-    The result is mean between such corners.
 
     :param corners: array of points with shape (-1, 2)
     :param radius: threshold in which corners will be joint
